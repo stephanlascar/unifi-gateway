@@ -4,9 +4,10 @@ import argparse
 import logging.handlers
 import socket
 import time
+import urllib2
 
 from daemon import Daemon
-from unifi_protocol import create_broadcast_message
+from unifi_protocol import create_broadcast_message, create_inform, encode_inform, decode_inform
 
 handler = logging.handlers.SysLogHandler(address='/dev/log')
 handler.setFormatter(logging.Formatter('[unifi-gateway] : %(levelname)s : %(message)s'))
@@ -33,6 +34,11 @@ class UnifiGateway(Daemon):
             time.sleep(self.interval)
             broadcast_index += 1
 
+        while True:
+            response = self._send_inform(create_inform(self.config))
+            logger.debug('Receive {} from controller'.format(response))
+            time.sleep(self.interval)
+
     def _send_broadcast(self, broadcast_index):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 20)
@@ -47,6 +53,27 @@ class UnifiGateway(Daemon):
         self.config.set('gateway', 'url', url)
         self.config.set('gateway', 'key', key)
         self._save_config()
+
+        response = self._send_inform(create_inform(self.config))
+        logger.debug('Receive {} from controller'.format(response))
+        if response['_type'] == 'setparam':
+            for key, value in response.items():
+                if key not in ['_type', 'server_time_in_utc', 'mgmt_cfg']:
+                    self.config.set('gateway', key, value)
+            self.config.set('gateway', 'is_adopted', True)
+            self._save_config()
+
+    def _send_inform(self, data):
+        headers = {
+            'Content-Type': 'application/x-binary',
+            'User-Agent': 'AirControl Agent v1.0'
+        }
+        url = self.config.get('gateway', 'url')
+
+        request = urllib2.Request(url, encode_inform(data), headers)
+        response = urllib2.urlopen(request)
+        logger.debug('Send inform request to {} : {}'.format(url, data))
+        return decode_inform(self.config, response.read())
 
     def _save_config(self):
         with open(CONFIG_FILE, 'w') as config_file:
